@@ -873,9 +873,9 @@ def main():
                     }
                 )
 
-                st.line_chart(
-                    trend,
-                    color=["#d7b563", "#93979e"],
+            st.dataframe(
+                    trend.style.format("{:,.2f}"),
+                    width="stretch",
                 )
 
             with st.expander("Period dates and validation"):
