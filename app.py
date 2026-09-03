@@ -9,7 +9,7 @@ import io
 import math
 import posixpath
 import re
-from turtle import st
+import streamlit as st
 import zipfile
 from dataclasses import dataclass
 from datetime import date
