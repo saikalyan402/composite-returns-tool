@@ -14,7 +14,7 @@ import zipfile
 from dataclasses import dataclass
 from datetime import date
 from xml.etree import ElementTree as ET
-
+import plotly.graph_objects as go
 import numpy as np
 import pandas as pd
 
@@ -857,7 +857,10 @@ def main():
                 "text/csv",
             )
 
-            with st.expander("Portfolio value over time"):
+            with st.expander(
+                "Portfolio value over time",
+                expanded=True,
+            ):
                 trend = pd.DataFrame(
                     {
                         "Selected frequency": (
@@ -871,11 +874,92 @@ def main():
                             ]
                         ),
                     }
+                ).sort_index()
+
+                fig = go.Figure()
+
+                fig.add_trace(
+                    go.Scatter(
+                        x=trend.index,
+                        y=trend["Selected frequency"],
+                        name="Selected frequency",
+                        mode="lines",
+                        line={
+                            "color": "#D7B563",
+                            "width": 3,
+                        },
+                        hovertemplate=(
+                            "%{x|%d-%b-%Y}<br>"
+                            "Portfolio value: ₹%{y:,.2f}"
+                            "<extra>Selected frequency</extra>"
+                        ),
+                    )
                 )
 
-            st.dataframe(
-                    trend.style.format("{:,.2f}"),
-                    width="stretch",
+                fig.add_trace(
+                    go.Scatter(
+                        x=trend.index,
+                        y=trend["Buy and hold"],
+                        name="Buy and hold",
+                        mode="lines",
+                        line={
+                            "color": "#B9BEC8",
+                            "width": 2,
+                            "dash": "dash",
+                        },
+                        hovertemplate=(
+                            "%{x|%d-%b-%Y}<br>"
+                            "Portfolio value: ₹%{y:,.2f}"
+                            "<extra>Buy and hold</extra>"
+                        ),
+                    )
+                )
+
+                fig.update_layout(
+                    template="plotly_dark",
+                    paper_bgcolor="#08090B",
+                    plot_bgcolor="#111216",
+                    font={
+                        "color": "#F3EEE2",
+                        "size": 13,
+                    },
+                    height=450,
+                    hovermode="x unified",
+                    margin={
+                        "l": 20,
+                        "r": 20,
+                        "t": 60,
+                        "b": 30,
+                    },
+                    legend={
+                        "orientation": "h",
+                        "yanchor": "bottom",
+                        "y": 1.02,
+                        "xanchor": "left",
+                        "x": 0,
+                    },
+                    xaxis={
+                        "title": "Date",
+                        "gridcolor": "#292A2E",
+                        "showgrid": False,
+                    },
+                    yaxis={
+                        "title": "Portfolio value (₹)",
+                        "tickprefix": "₹",
+                        "tickformat": ",.0f",
+                        "gridcolor": "#292A2E",
+                    },
+                )
+
+                st.plotly_chart(
+                    fig,
+                    use_container_width=True,
+                    theme=None,
+                    key="portfolio_value_chart",
+                    config={
+                        "displaylogo": False,
+                        "scrollZoom": False,
+                    },
                 )
 
             with st.expander("Period dates and validation"):
