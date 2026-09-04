@@ -271,6 +271,16 @@ def rebalancing_dates(model, frequency, end, step=12, unit='Months'):
     return pd.DatetimeIndex(sorted(set(dates)))
 
 
+def canonical_frequency(frequency, step=12, unit='Months'):
+    """Map user choices that are defined as equivalent to one schedule."""
+    if frequency == 'Custom':
+        if unit == 'Months' and int(step) == 3:
+            return 'Quarterly'
+        if unit == 'Days' and int(step) == 90:
+            return 'Quarterly'
+    return frequency
+
+
 @dataclass
 class Simulation:
     daily: pd.DataFrame
@@ -403,12 +413,20 @@ def calculate(model, config, allocation, vol_mode=VOL_MODES[0]):
     expected=model['calendar'][(model['calendar']>=effective_start)&(model['calendar']<=effective_end)]
     if not expected.equals(prices.index):
         raise InputError('Source dates and the working-day calendar differ inside the selected period.')
-    schedule=rebalancing_dates(model,config['frequency'],effective_end,config['custom_step'],config['custom_unit'])
+    schedule_frequency=canonical_frequency(
+        config['frequency'], config['custom_step'], config['custom_unit']
+    )
+    schedule=rebalancing_dates(model,schedule_frequency,effective_end,config['custom_step'],config['custom_unit'])
     selected=simulate(prices,weights,amount,schedule)
     buyhold=simulate(prices,weights,amount,[])
     summary,display,windows,constituent=summary_tables(model,selected,buyhold,prices,amount,requested_end,vol_mode)
     metadata=pd.DataFrame([{'Index':n,'Target weight (%)':weights[n]*100,
-        'Initial target allocation (₹)':weights[n]*amount,'First usable date':starts[n],
+        'Initial target allocation (₹)':weights[n]*amount,
+        'Source data starts': model['raw'][config['mode']][n].first_valid_index(),
+        'Declared start date': model['declared'][config['mode']].get(
+            n, model['raw'][config['mode']][n].first_valid_index()
+        ),
+        'First usable date':starts[n],
         'Forward-filled observations (all history)':fills[n]} for n in weights.index])
     reconciliation=selected.market_values.sum(axis=1)+selected.daily['Cash (₹)']-selected.daily['Portfolio value (₹)']
     checks=pd.DataFrame([
@@ -420,7 +438,7 @@ def calculate(model, config, allocation, vol_mode=VOL_MODES[0]):
     return dict(selected=selected,buyhold=buyhold,summary=summary,display=display,windows=windows,
                 prices=prices,adjusted=adjusted,constituent=constituent,metadata=metadata,
                 schedule=schedule,checks=checks,start=effective_start,end=effective_end,
-                config=config,vol_mode=vol_mode)
+                config=config,vol_mode=vol_mode,schedule_frequency=schedule_frequency)
 
 
 EXPLANATION = r"""
@@ -458,6 +476,11 @@ Buy and hold has no subsequent rebalances. Custom Months uses the workbook's see
 month-end rule. Custom Days advances nominal dates by the chosen interval, rolls each back
 to a working day and removes duplicates. This deliberately prevents the Excel custom-day
 formula from getting stuck on a weekend/holiday when its adjusted date does not advance.
+
+For consistency, **Custom: 3 Months** and **Custom: 90 Days** are intentionally normalized
+to the exact **Quarterly** calendar, including the Quarterly seed date and month-end rule.
+Therefore all three choices produce identical trades, daily values and summary results.
+Other custom day intervals remain elapsed-calendar-day schedules.
 
 ### 5. Allocate, round units and retain cash
 For each selected constituent at inception and every rebalance:
@@ -556,6 +579,10 @@ button[data-baseweb="tab"][aria-selected="true"] {color:#f0cf83;}
 [data-testid="stFileUploader"] {border:1px dashed #a98a44;border-radius:12px;padding:12px;}
 .hero {padding:10px 0 22px;border-bottom:1px solid #544527;margin-bottom:22px;}
 .kicker {letter-spacing:3px;color:#bd9b50;font-size:12px;font-weight:700;}
+.date-card {background:linear-gradient(135deg,#17140d,#111216);border:1px solid #7a622f;
+border-radius:14px;padding:16px 18px;margin:6px 0 16px;}
+.date-label {color:#bd9b50;font-size:12px;letter-spacing:1.5px;font-weight:700;}
+.date-value {color:#f0cf83;font-size:25px;font-weight:750;margin-top:4px;}
 </style>
 """
 
@@ -717,24 +744,29 @@ def main():
     with st.sidebar:
         st.header('Portfolio inputs')
         st.caption('Defaults are read from the uploaded workbook. Submit changes to recalculate all results.')
+        frequency=st.selectbox(
+            'Rebalancing frequency', FREQUENCIES,
+            index=FREQUENCIES.index(defaults['frequency']) if defaults['frequency'] in FREQUENCIES else 3,
+            key='input_frequency'
+        )
         with st.form('portfolio_inputs'):
             amount=st.number_input('Investment amount (₹)',min_value=1.0,value=max(1.0,defaults['amount']),step=10000.0,key='input_amount')
             start=st.date_input('Investment date',value=defaults['start'],min_value=date(1900,1,1),max_value=date(2100,12,31),key='input_start')
             end=st.date_input('As on date',value=defaults['end'],min_value=date(1900,1,1),max_value=date(2100,12,31),key='input_end')
             mode=st.selectbox('Series based on',['Index','NAV'],index=0 if defaults['mode']=='Index' else 1,key='input_mode')
-            frequency=st.selectbox('Rebalancing frequency',FREQUENCIES,index=FREQUENCIES.index(defaults['frequency']) if defaults['frequency'] in FREQUENCIES else 3,key='input_frequency')
-            st.caption('Custom interval below is used only when frequency is Custom.')
-            step=st.number_input('Custom interval',min_value=1,max_value=10000,value=max(1,min(10000,defaults['custom_step'])),key='input_step')
-            unit = st.selectbox(
-                "Custom interval unit",
-                ["Months", "Days"],
-                index=(
-                    1
-                    if defaults["custom_unit"] == "Days"
-                    else 0
-                ),
-                key="input_unit",
-            )
+            if frequency == 'Custom':
+                st.markdown('##### Custom schedule')
+                step=st.number_input('Custom interval',min_value=1,max_value=10000,value=max(1,min(10000,defaults['custom_step'])),key='input_step')
+                unit = st.selectbox(
+                    "Custom interval unit", ["Months", "Days"],
+                    index=1 if defaults["custom_unit"] == "Days" else 0,
+                    key="input_unit",
+                )
+                if (unit == 'Months' and int(step) == 3) or (unit == 'Days' and int(step) == 90):
+                    st.info('This interval uses the exact Quarterly schedule, so its results match Quarterly.')
+            else:
+                step=max(1,min(10000,defaults['custom_step']))
+                unit=defaults['custom_unit'] if defaults['custom_unit'] in ('Months','Days') else 'Months'
 
             vol_mode = st.selectbox(
                 "Volatility calculation",
@@ -747,27 +779,18 @@ def main():
                 "Enter weights below; the total must equal 100%."
             )
 
-            allocation = st.data_editor(
-                model["allocation"],
-                hide_index=True,
-                disabled=["Index"],
-                column_config={
-                    "Index": st.column_config.TextColumn(
-                        "Name of Index",
-                        width="large",
-                    ),
-                    "Weight (%)": st.column_config.NumberColumn(
-                        "Weight in Portfolio (%)",
-                        min_value=0.0,
-                        max_value=100.0,
-                        step=1.0,
-                        format="%.2f",
-                    ),
-                },
-                width="stretch",
-                height=(len(model["allocation"]) + 1) * 35 + 3,
-                key="input_allocation",
-            )
+            with st.expander('Edit all index weights', expanded=True):
+                allocation = st.data_editor(
+                    model["allocation"], hide_index=True, disabled=["Index"],
+                    column_config={
+                        "Index": st.column_config.TextColumn("Name of Index", width="large"),
+                        "Weight (%)": st.column_config.NumberColumn(
+                            "Weight (%)", min_value=0.0, max_value=100.0,
+                            step=1.0, format="%.2f"
+                        ),
+                    },
+                    width="stretch", height=520, key="input_allocation",
+                )
 
             st.form_submit_button(
                 "Calculate portfolio",
@@ -804,7 +827,17 @@ def main():
     if result is not None:
         with summary_tab:
             s=result['selected'];b=result['buyhold'];table=result['summary']
-            st.caption(f'{frequency} · {mode} series · {result["start"]:%d-%b-%Y} to {result["end"]:%d-%b-%Y} · {len(s.daily):,} trading dates')
+            schedule_label = result['schedule_frequency']
+            choice_label = frequency if frequency != 'Custom' else f'Custom: {int(step)} {unit}'
+            st.markdown(
+                f'<div class="date-card"><div class="date-label">PERFORMANCE AS ON</div>'
+                f'<div class="date-value">{result["end"]:%d-%b-%Y}</div>'
+                f'<div style="color:#c4bba7;margin-top:6px">{choice_label} · {mode} series · '
+                f'{len(s.daily):,} trading dates</div></div>',
+                unsafe_allow_html=True,
+            )
+            if choice_label != schedule_label:
+                st.success(f'{choice_label} is normalized to the {schedule_label} calendar for exact result equivalence.')
             if result['start']!=pd.Timestamp(start):
                 st.info(f'Effective investment date: {result["start"]:%d-%b-%Y}, after working-day and source-history adjustments.')
             if result['end']!=pd.Timestamp(end):
@@ -818,7 +851,11 @@ def main():
             metrics[2].metric('CAGR' if (result['end']-result['start']).days>365 else 'Absolute return',f'{value:.2%}')
             difference=s.daily.iloc[-1]['Portfolio value (₹)']-b.daily.iloc[-1]['Portfolio value (₹)']
             metrics[3].metric('Value versus buy and hold',f'₹{difference:+,.2f}')
-            st.subheader("Allocation")
+            st.subheader("Selected indices and starting dates")
+            st.caption(
+                'Source data starts is the first numeric observation. Declared start comes from '
+                'the workbook metadata. First usable date is the later of those two dates.'
+            )
             show_table(st, result["metadata"])
 
             st.subheader(
