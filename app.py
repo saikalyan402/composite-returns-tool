@@ -216,10 +216,29 @@ def read_named_indices(book, master_dates):
     return combined, starts, detected
 
 
-def read_index_only_model(book, sheet_name='Index'):
+def find_index_header_row(book, sheet_name, max_scan_rows=20):
+    """Return the row containing Date plus at least one index heading."""
+    preview = book.cells(sheet_name, last_row=max_scan_rows)
+    for row in range(1, max_scan_rows + 1):
+        headings = header_columns(preview, row)
+        has_date = any(
+            str(value).strip().lower() == 'date'
+            for value in headings.values()
+        )
+        if has_date and len(headings) >= 2:
+            return row
+    return None
+
+
+def read_index_only_model(book, sheet_name='Index', header_row=None):
     """Build the complete model from a workbook containing only an Index sheet."""
     cells = book.cells(sheet_name)
-    headings = header_columns(cells, 1)
+    header_row = header_row or find_index_header_row(book, sheet_name)
+    if header_row is None:
+        raise InputError(
+            f'{sheet_name}: could not find a row containing Date and index headings.'
+        )
+    headings = header_columns(cells, header_row)
     date_columns = [
         col for col, value in headings.items()
         if str(value).strip().lower() == 'date'
@@ -231,14 +250,14 @@ def read_index_only_model(book, sheet_name='Index'):
     rows = {}
     for address, value in cells.items():
         match = re.fullmatch(re.escape(date_col) + r'(\d+)', address)
-        if not match or int(match.group(1)) < 2:
+        if not match or int(match.group(1)) <= header_row:
             continue
         try:
             rows[int(match.group(1))] = book.day(value)
         except InputError:
             continue
     if not rows:
-        raise InputError('Index must contain valid dates below the Date heading.')
+        raise InputError(f'{sheet_name} must contain valid dates below the Date heading.')
 
     columns = {}
     dates = list(rows.values())
@@ -326,14 +345,35 @@ def read_model(content):
     # Use the one-sheet engine whenever an Index sheet exists but the complete
     # old macro-workbook layout does not. Extra default/hidden sheets are ignored,
     # and Index matching is case-insensitive with surrounding spaces removed.
-    if index_sheet is not None and not has_complete_legacy_layout:
-        return read_index_only_model(book, index_sheet)
-
-    if index_sheet is None and not has_complete_legacy_layout:
-        raise InputError(
-            'No Index worksheet found. Rename the data worksheet to Index. '
-            'Capitalization and surrounding spaces are accepted.'
-        )
+    if not has_complete_legacy_layout:
+        # Prefer an explicitly named Index sheet. Otherwise, use the only sheet
+        # or automatically find the sheet containing Date plus index headings.
+        if index_sheet is not None:
+            selected_sheet = index_sheet
+            header_row = find_index_header_row(book, selected_sheet)
+        elif len(book.sheets) == 1:
+            selected_sheet = next(iter(book.sheets))
+            header_row = find_index_header_row(book, selected_sheet)
+        else:
+            candidates = [
+                (sheet, find_index_header_row(book, sheet))
+                for sheet in book.sheets
+            ]
+            candidates = [(sheet, row) for sheet, row in candidates if row is not None]
+            if len(candidates) == 1:
+                selected_sheet, header_row = candidates[0]
+            elif not candidates:
+                raise InputError(
+                    'No worksheet contains a Date column and index headings. '
+                    'Available worksheets: ' + ', '.join(book.sheets)
+                )
+            else:
+                raise InputError(
+                    'More than one worksheet looks like index data: ' +
+                    ', '.join(sheet for sheet, _ in candidates) +
+                    '. Keep one data worksheet or name the required sheet Index.'
+                )
+        return read_index_only_model(book, selected_sheet, header_row)
 
     for sheet in legacy_required:
         if sheet not in book.sheets:
@@ -998,7 +1038,7 @@ def main():
     st.set_page_config(page_title='Composite Returns | Portfolio Lab',page_icon='◈',layout='wide')
     st.markdown(CSS,unsafe_allow_html=True)
     st.markdown('<div class="hero"><div class="kicker">PORTFOLIO LAB</div><h1>Composite Returns</h1><p>Historical portfolio performance, calculated from your workbook.</p></div>',unsafe_allow_html=True)
-    uploaded=st.file_uploader('Upload the Composite Returns workbook',type=['xlsm','xlsx'])
+    uploaded=st.file_uploader('Upload the Index workbook',type=['xlsm','xlsx'])
     if uploaded is None:
         st.info('Upload your Excel workbook to unlock the portfolio inputs, summary, original data and calculation explanations.')
         st.stop()
