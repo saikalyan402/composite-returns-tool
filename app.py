@@ -216,9 +216,9 @@ def read_named_indices(book, master_dates):
     return combined, starts, detected
 
 
-def read_index_only_model(book):
+def read_index_only_model(book, sheet_name='Index'):
     """Build the complete model from a workbook containing only an Index sheet."""
-    cells = book.cells('Index')
+    cells = book.cells(sheet_name)
     headings = header_columns(cells, 1)
     date_columns = [
         col for col, value in headings.items()
@@ -303,7 +303,7 @@ def read_index_only_model(book):
         'defaults': defaults,
         'sheets': list(book.sheets),
         'states': book.states,
-        'named_index_sheets': ['Index'],
+        'named_index_sheets': [sheet_name],
         'available_modes': ['Index'],
         'simple_workbook': True,
     }
@@ -311,9 +311,31 @@ def read_index_only_model(book):
 
 def read_model(content):
     book = ExcelSource(content)
-    if set(book.sheets) == {'Index'}:
-        return read_index_only_model(book)
-    for sheet in ['ETF Allocation', 'NAV', 'Index', 'Face Value', 'Holidays', 'Reblancing Dates']:
+    normalized_sheets = {
+        str(name).strip().lower(): name for name in book.sheets
+    }
+    index_sheet = normalized_sheets.get('index')
+    legacy_required = [
+        'ETF Allocation', 'NAV', 'Index', 'Face Value',
+        'Holidays', 'Reblancing Dates'
+    ]
+    has_complete_legacy_layout = all(
+        sheet in book.sheets for sheet in legacy_required
+    )
+
+    # Use the one-sheet engine whenever an Index sheet exists but the complete
+    # old macro-workbook layout does not. Extra default/hidden sheets are ignored,
+    # and Index matching is case-insensitive with surrounding spaces removed.
+    if index_sheet is not None and not has_complete_legacy_layout:
+        return read_index_only_model(book, index_sheet)
+
+    if index_sheet is None and not has_complete_legacy_layout:
+        raise InputError(
+            'No Index worksheet found. Rename the data worksheet to Index. '
+            'Capitalization and surrounding spaces are accepted.'
+        )
+
+    for sheet in legacy_required:
         if sheet not in book.sheets:
             raise InputError(f'Missing required worksheet: {sheet}')
     allocation = book.cells('ETF Allocation')
