@@ -216,8 +216,103 @@ def read_named_indices(book, master_dates):
     return combined, starts, detected
 
 
+def read_index_only_model(book):
+    """Build the complete model from a workbook containing only an Index sheet."""
+    cells = book.cells('Index')
+    headings = header_columns(cells, 1)
+    date_columns = [
+        col for col, value in headings.items()
+        if str(value).strip().lower() == 'date'
+    ]
+    if not date_columns:
+        raise InputError('Index row 1 must contain a Date column.')
+    date_col = date_columns[0]
+
+    rows = {}
+    for address, value in cells.items():
+        match = re.fullmatch(re.escape(date_col) + r'(\d+)', address)
+        if not match or int(match.group(1)) < 2:
+            continue
+        try:
+            rows[int(match.group(1))] = book.day(value)
+        except InputError:
+            continue
+    if not rows:
+        raise InputError('Index must contain valid dates below the Date heading.')
+
+    columns = {}
+    dates = list(rows.values())
+    for col, heading in headings.items():
+        if col == date_col:
+            continue
+        name = clean_named_index(heading)
+        if not name:
+            continue
+        if name in columns:
+            raise InputError(f'Duplicate index name after removing Priyam -: {name}')
+        values = [cells.get(f'{col}{row}') for row in rows]
+        columns[name] = pd.to_numeric(
+            pd.Series(values, index=dates), errors='coerce'
+        )
+
+    index = pd.DataFrame(columns).sort_index()
+    if index.empty:
+        raise InputError('Index must contain at least one numeric index column.')
+    if index.index.has_duplicates:
+        raise InputError('Index contains duplicate dates. Each date must appear once.')
+    if (index.notna() & (index <= 0)).any().any():
+        raise InputError('Index values must be positive numbers.')
+
+    starts = {}
+    for name in index.columns:
+        first = index[name].first_valid_index()
+        if first is None:
+            raise InputError(f'No numeric values found for {name}.')
+        starts[name] = first
+
+    count = len(index.columns)
+    equal = 100.0 / count
+    allocation_rows = []
+    allocated = 0.0
+    for position, name in enumerate(index.columns):
+        weight = 100.0 - allocated if position == count - 1 else equal
+        allocation_rows.append({'Index': name, 'Weight (%)': weight})
+        allocated += weight
+
+    calendar = index.index
+    common_start = max(starts.values())
+    first_date = calendar[calendar.searchsorted(common_start, side='left')]
+    defaults = {
+        'amount': 120000.0,
+        'start': first_date.date(),
+        'end': calendar[-1].date(),
+        'mode': 'Index',
+        'frequency': 'Annually',
+        'custom_step': 12,
+        'custom_unit': 'Months',
+    }
+    seeds = {name: calendar[0] for name in
+             ['Monthly', 'Quarterly', 'Semi-Annually', 'Annually', 'Custom']}
+    return {
+        'raw': {'Index': index},
+        'face': {name: 10.0 for name in index.columns},
+        'declared': {'Index': starts},
+        'calendar': calendar,
+        'seeds': seeds,
+        'allocation': pd.DataFrame(allocation_rows),
+        'defaults': defaults,
+        'sheets': list(book.sheets),
+        'states': book.states,
+        'named_index_sheets': ['Index'],
+        'available_modes': ['Index'],
+        'simple_workbook': True,
+    }
+
+
 def read_model(content):
     book = ExcelSource(content)
+    if set(book.sheets) == {'Index'}:
+        return read_index_only_model(book)
     for sheet in ['ETF Allocation', 'NAV', 'Index', 'Face Value', 'Holidays', 'Reblancing Dates']:
         if sheet not in book.sheets:
             raise InputError(f'Missing required worksheet: {sheet}')
@@ -301,7 +396,8 @@ def read_model(content):
     return {'raw': {'Index':index,'NAV':nav}, 'face':face, 'declared':declared,
             'calendar':calendar, 'seeds':seed_dates, 'allocation':weights,
             'defaults':defaults, 'sheets':list(book.sheets), 'states':book.states,
-            'named_index_sheets':named_sheets}
+            'named_index_sheets':named_sheets,
+            'available_modes':['Index','NAV'], 'simple_workbook':False}
 
 
 def previous_working(calendar, value):
@@ -357,6 +453,45 @@ def rebalancing_dates(model, frequency, end, step=12, unit='Months'):
         raise InputError('Unsupported rebalancing frequency.')
     if frequency == 'Custom' and (step < 1 or unit not in ('Days','Months')):
         raise InputError('Custom interval must be a positive number of Days or Months.')
+
+    if model.get('simple_workbook'):
+        calendar = model['calendar']
+        start = calendar[0]
+        end = pd.Timestamp(end).normalize()
+        mapped_dates = []
+
+        if frequency == 'Custom' and unit == 'Days':
+            nominal = start + pd.Timedelta(days=int(step))
+            while nominal <= end:
+                mapped = previous_working(calendar, nominal)
+                if mapped is not None:
+                    mapped_dates.append(mapped)
+                nominal += pd.Timedelta(days=int(step))
+        else:
+            months = {'Monthly':1, 'Quarterly':3,
+                      'Semi-Annually':6, 'Annually':12}
+            interval = months.get(frequency, int(step))
+            if frequency == 'Monthly':
+                nominal = start + pd.offsets.MonthEnd(0)
+            elif frequency == 'Quarterly':
+                nominal = start.to_period('Q-DEC').end_time.normalize()
+            elif frequency == 'Semi-Annually':
+                month = 6 if start.month <= 6 else 12
+                nominal = pd.Timestamp(start.year, month, 1) + pd.offsets.MonthEnd(0)
+            elif frequency == 'Annually':
+                nominal = pd.Timestamp(start.year, 12, 31)
+            else:
+                nominal = start + pd.offsets.MonthEnd(interval)
+            if nominal <= start:
+                nominal += pd.offsets.MonthEnd(interval)
+            while nominal <= end:
+                mapped = previous_working(calendar, nominal)
+                if mapped is not None:
+                    mapped_dates.append(mapped)
+                nominal += pd.offsets.MonthEnd(interval)
+
+        return pd.DatetimeIndex(sorted(set(mapped_dates)))
+
     months = {'Monthly':1,'Quarterly':3,'Semi-Annually':6,'Annually':12}
     cursor = model['seeds'][frequency]
     dates = [cursor]
@@ -555,6 +690,13 @@ def calculate(model, config, allocation, vol_mode=VOL_MODES[0]):
 
 EXPLANATION = r"""
 ### 1. Source data and inputs
+For a workbook containing only an **Index** sheet, row 1 supplies the Date and index
+headings and row 2 onward supplies the observations. The application creates the allocation
+inputs, effective working-date calendar, index starting dates and rebalancing schedules from
+that sheet. It removes an optional **Priyam -** prefix, applies face value 10 to every series,
+defaults to equal weights and calculates everything in Python. No macro or other worksheet
+is required.
+
 The uploaded **ETF Allocation** sheet supplies weights (A:B), investment date (F3),
 frequency (F5), amount (F7), Index/NAV choice (F9), end date (F10), and custom interval
 (G5:G6). The **Index** and **NAV** sheets supply historical observations. **Face Value**
@@ -857,7 +999,12 @@ def main():
                 del st.session_state[key]
         st.session_state['upload_id']=fingerprint
     defaults=model['defaults']
-    if model.get('named_index_sheets'):
+    if model.get('simple_workbook'):
+        st.success(
+            f'Index-only workbook loaded: {len(model["raw"]["Index"].columns)} indices '
+            'detected. Optional Priyam - prefixes were removed; face value 10 is applied.'
+        )
+    elif model.get('named_index_sheets'):
         st.success(
             'Additional named indices loaded from: ' +
             ', '.join(model['named_index_sheets']) +
@@ -875,7 +1022,12 @@ def main():
             amount=st.number_input('Investment amount (₹)',min_value=1.0,value=max(1.0,defaults['amount']),step=10000.0,key='input_amount')
             start=st.date_input('Investment date',value=defaults['start'],min_value=date(1900,1,1),max_value=date(2100,12,31),key='input_start')
             end=st.date_input('As on date',value=defaults['end'],min_value=date(1900,1,1),max_value=date(2100,12,31),key='input_end')
-            mode=st.selectbox('Series based on',['Index','NAV'],index=0 if defaults['mode']=='Index' else 1,key='input_mode')
+            available_modes=model.get('available_modes',['Index','NAV'])
+            mode=st.selectbox(
+                'Series based on', available_modes,
+                index=available_modes.index(defaults['mode']) if defaults['mode'] in available_modes else 0,
+                key='input_mode', disabled=len(available_modes)==1
+            )
             if frequency == 'Custom':
                 st.markdown('##### Custom schedule')
                 step=st.number_input('Custom interval',min_value=1,max_value=10000,value=max(1,min(10000,defaults['custom_step'])),key='input_step')
@@ -1149,7 +1301,7 @@ def main():
         st.download_button('Download this original-data page (CSV)',frame.to_csv().encode(),
                            'original_data_page.csv','text/csv')
         with st.expander('Download complete source price tables'):
-            for source in ['Index','NAV']:
+            for source in model['raw']:
                 st.download_button(f'Download complete {source} source (CSV)',model['raw'][source].to_csv().encode(),f'original_{source.lower()}_prices.csv','text/csv')
     with explanation_tab:
         st.markdown(EXPLANATION)
