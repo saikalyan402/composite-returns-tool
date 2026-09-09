@@ -21,7 +21,9 @@ import pandas as pd
 NS = {'m': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
 REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
 PERIODS = [('1 Month', 1), ('3 Months', 3), ('6 Months', 6), ('1 Year', 12),
-           ('3 Years', 36), ('5 Years', 60), ('10 Years', 120), ('Since Inception', None)]
+           ('3 Years', 36), ('5 Years', 60), ('7 Years', 84),
+           ('10 Years', 120), ('12 Years', 144), ('15 Years', 180),
+           ('20 Years', 240), ('Since Inception', None)]
 FREQUENCIES = ['Monthly', 'Quarterly', 'Semi-Annually', 'Annually', 'Custom', 'Buy and Hold']
 VOL_MODES = ['Match saved report: sample volatility', 'Match live formulas: population portfolio / sample indices']
 
@@ -874,7 +876,8 @@ The **Daily calculations** tab exposes prices, units, market values, cash, actua
 returns and the full initial-investment/rebalancing ledger for both strategies.
 
 ### 7. Choose summary windows
-The report contains 1, 3 and 6 months; 1, 3, 5 and 10 years; and Since Inception.
+The report contains 1, 3 and 6 months; 1, 3, 5, 7, 10, 12, 15 and 20 years;
+and Since Inception.
 For each lookback, subtract its calendar months from the requested end date. If that end
 is month-end, preserve month-end when shifting. Roll the anchor back to the previous working
 day. Since Inception starts at the effective investment date. Periods before inception are
@@ -887,7 +890,8 @@ launched independently for each lookback.
 
 `CAGR = (ending value / starting value) ** (365 / calendar days) − 1`
 
-The labelled 1-Year, 3-Year, 5-Year and 10-Year windows always use CAGR. Therefore the
+The labelled 1-Year, 3-Year, 5-Year, 7-Year, 10-Year, 12-Year, 15-Year and 20-Year
+windows always use CAGR. Therefore the
 1-Year window remains CAGR even when weekends, holidays or missing observations make its
 actual start-to-end span 363 or 364 days. Since Inception uses CAGR once the requested
 calendar range reaches one year; otherwise it uses absolute return.
